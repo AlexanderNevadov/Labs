@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Градиентный спуск/подъём - 3D (Глобальный поиск)</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: 'Courier New', monospace;
+      background-color: #000;
+    }
+
+    .panel {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      background: #111;
+      border: 1px solid #888;
+      padding: 10px 14px;
+      color: #fff;
+      font-size: 13px;
+      z-index: 100;
+      font-family: monospace;
+      max-width: 280px;
+    }
+
+    .panel div {
+      margin: 5px 0;
+    }
+
+    .panel label {
+      display: inline-block;
+      width: 80px;
+      color: #fff;
+    }
+
+    input,
+    select,
+    button {
+      background: #000;
+      border: 1px solid #aaa;
+      color: #fff;
+      font-family: monospace;
+      font-size: 12px;
+      padding: 3px 6px;
+      cursor: pointer;
+    }
+
+    button {
+      background: #333;
+    }
+
+    button:hover {
+      background: #555;
+    }
+
+    .status {
+      position: absolute;
+      top: 15px;
+      right: 15px;
+      background: #000;
+      border: 1px solid #aaa;
+      padding: 6px 10px;
+      font-family: monospace;
+      font-size: 11px;
+      color: #fff;
+      z-index: 100;
+      max-width: 380px;
+      text-align: right;
+    }
+
+    hr {
+      margin: 6px 0;
+      border-color: #444;
+    }
+
+    .click-hint {
+      position: absolute;
+      bottom: 20px;
+      right: 20px;
+      background: #111;
+      border: 1px solid #666;
+      padding: 4px 8px;
+      font-size: 10px;
+      color: #aaa;
+      font-family: monospace;
+      z-index: 100;
+    }
+
+    .mode-info {
+      font-size: 10px;
+      color: #888;
+      margin-top: 5px;
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="panel">
+    <div>
+      <label>РЕЖИМ:</label>
+      <select id="mode">
+        <option value="min">ГЛОБАЛЬНЫЙ МИНИМУМ</option>
+        <option value="max">ГЛОБАЛЬНЫЙ МАКСИМУМ</option>
+      </select>
+    </div>
+    <div>
+      <label>ШУМ (0-1):</label>
+      <input type="number" id="noiseVal" value="0.0" step="0.1" min="0" max="1">
+    </div>
+    <div>
+      <button id="clearBtn">ОЧИСТИТЬ ПУТИ</button>
+    </div>
+
+  </div>
+  <div class="status" id="info">ГОТОВ. НАЖМИТЕ "НАЙТИ ГЛОБАЛЬНЫЙ ЭКСТРЕМУМ"</div>
+
+  <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.128.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.128.0/examples/jsm/"
+            }
+        }
+    </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(7, 6, 8);
+    camera.lookAt(0, 0, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+
+    // ----- ОСВЕЩЕНИЕ -----
+    const ambient = new THREE.AmbientLight(0x444444);
+    scene.add(ambient);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+    dirLight.position.set(2, 5, 3);
+    scene.add(dirLight);
+    const fillLight = new THREE.PointLight(0x666666, 0.4);
+    fillLight.position.set(-1, 2, -2);
+    scene.add(fillLight);
+
+    // ----- СЕТКА И ОСИ -----
+    const grid = new THREE.GridHelper(12, 20, 0x888888, 0x444444);
+    grid.position.y = -1.3;
+    scene.add(grid);
+    const axes = new THREE.AxesHelper(5);
+    axes.material.transparent = true;
+    axes.material.opacity = 0.25;
+    scene.add(axes);
+
+    const BOUNDS = {
+      xMin: -3.8,
+      xMax: 4.2,
+      yMin: -3.2,
+      yMax: 3.8
+    };
+
+    let currentNoise = 0.0;
+
+    function baseFunc(x, y) {
+      const minValley = -2.2 * Math.exp(-((x - 2.0) ** 2 + (y - 1.5) ** 2) / 2.5);
+      const maxHill = 2.2 * Math.exp(-((x + 1.0) ** 2 + (y + 0.5) ** 2) / 2.2);
+      const edgeLift = 0.6 * Math.exp(-((x + 2.5) ** 2 + (y + 2.0) ** 2) / 12);
+      return minValley + maxHill + edgeLift;
+    }
+
+    function smoothNoise(x, y, level) {
+      if (level === 0) return 0;
+      const n1 = 0.4 * Math.sin(1.8 * x) * Math.cos(1.6 * y);
+      const n2 = 0.3 * Math.sin(2.2 * x + 0.8) * Math.sin(2.0 * y);
+      const n3 = 0.2 * Math.sin(1.4 * x * y);
+      return level * (n1 + n2 + n3) * 0.5;
+    }
+
+    function f(x, y) {
+      return baseFunc(x, y) + smoothNoise(x, y, currentNoise);
+    }
+
+    function grad(x, y, eps = 0.008) {
+      const dx = (f(x + eps, y) - f(x - eps, y)) / (2 * eps);
+      const dy = (f(x, y + eps) - f(x, y - eps)) / (2 * eps);
+      return { dx, dy };
+    }
+
+    function localSearch(startX, startY, mode, baseStep = 0.05, maxIters = 400) {
+      const path = [{ x: startX, y: startY, z: f(startX, startY) }];
+      let x = startX, y = startY;
+      let prevVal = f(x, y);
+      let stuck = 0;
+
+      for (let i = 0; i < maxIters; i++) {
+        const g = grad(x, y);
+        let dx = g.dx, dy = g.dy;
+
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len > 0.0001) {
+          dx = dx / len;
+          dy = dy / len;
+        }
+
+        let currentStep = baseStep;
+        if (len < 0.02) currentStep = baseStep * 0.3;
+        if (len < 0.005) currentStep = baseStep * 0.1;
+
+        if (mode === 'min') {
+          x -= currentStep * dx;
+          y -= currentStep * dy;
+        } else {
+          x += currentStep * dx;
+          y += currentStep * dy;
+        }
+
+        x = Math.min(BOUNDS.xMax - 0.05, Math.max(BOUNDS.xMin + 0.05, x));
+        y = Math.min(BOUNDS.yMax - 0.05, Math.max(BOUNDS.yMin + 0.05, y));
+
+        const newVal = f(x, y);
+        path.push({ x, y, z: newVal });
+
+        if (Math.abs(newVal - prevVal) < 0.00012) {
+          stuck++;
+          if (stuck >= 6) break;
+        } else {
+          stuck = 0;
+        }
+        prevVal = newVal;
+      }
+      return path;
+    }
+
+    function globalSearch(mode) {
+      const startPoints = [
+        [-3.0, -2.5], [-3.0, 0.0], [-3.0, 2.5],
+        [0.0, -2.5], [0.0, 0.0], [0.0, 2.5],
+        [3.0, -2.5], [3.0, 0.0], [3.0, 2.5]
+      ];
+
+      let bestPath = null;
+      let bestValue = mode === 'min' ? Infinity : -Infinity;
+      let bestEndPoint = null;
+
+      for (let i = 0; i < startPoints.length; i++) {
+        const [sx, sy] = startPoints[i];
+        const path = localSearch(sx, sy, mode, 0.05, 400);
+        const last = path[path.length - 1];
+
+        if (mode === 'min') {
+          if (last.z < bestValue) {
+            bestValue = last.z;
+            bestPath = path;
+            bestEndPoint = { x: last.x, y: last.y, z: last.z };
+          }
+        } else {
+          if (last.z > bestValue) {
+            bestValue = last.z;
+            bestPath = path;
+            bestEndPoint = { x: last.x, y: last.y, z: last.z };
+          }
+        }
+      }
+
+      return { path: bestPath, value: bestValue, point: bestEndPoint };
+    }
+
+    let surfaceMesh = null;
+
+    function buildSurface() {
+      if (surfaceMesh) scene.remove(surfaceMesh);
+
+      const width = 80;
+      const height = 80;
+      const vertices = [];
+      const indices = [];
+
+      for (let i = 0; i <= width; i++) {
+        const x = BOUNDS.xMin + (i / width) * (BOUNDS.xMax - BOUNDS.xMin);
+        for (let j = 0; j <= height; j++) {
+          const y = BOUNDS.yMin + (j / height) * (BOUNDS.yMax - BOUNDS.yMin);
+          const z = f(x, y);
+          vertices.push(x, z, y);
+        }
+      }
+
+      for (let i = 0; i < width; i++) {
+        for (let j = 0; j < height; j++) {
+          const a = i * (height + 1) + j;
+          const b = i * (height + 1) + j + 1;
+          const c = (i + 1) * (height + 1) + j;
+          const d = (i + 1) * (height + 1) + j + 1;
+          indices.push(a, b, c);
+          indices.push(b, d, c);
+        }
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertices), 3));
+      geometry.setIndex(indices);
+      geometry.computeVertexNormals();
+
+      const material = new THREE.MeshStandardMaterial({
+        color: 0xaaaaaa,
+        roughness: 0.7,
+        metalness: 0.1,
+        flatShading: true,
+        side: THREE.DoubleSide
+      });
+      const mesh = new THREE.Mesh(geometry, material);
+      scene.add(mesh);
+      surfaceMesh = mesh;
+    }
+
+    let currentPath = [];
+    let pathSpheres = [];
+    let pathLine = null;
+
+    function clearPathVisual() {
+      pathSpheres.forEach(s => scene.remove(s));
+      if (pathLine) scene.remove(pathLine);
+      pathSpheres = [];
+      pathLine = null;
+    }
+
+    function drawPath3D() {
+      clearPathVisual();
+      if (!currentPath || currentPath.length === 0) return;
+
+      const points3d = [];
+      for (let i = 0; i < currentPath.length; i++) {
+        const p = currentPath[i];
+        const pos = new THREE.Vector3(p.x, p.z, p.y);
+        points3d.push(pos);
+
+        const sphereGeo = new THREE.SphereGeometry(0.09, 12, 12);
+        const sphereMat = new THREE.MeshStandardMaterial({ color: 0xff3333 });
+        const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+        sphere.position.copy(pos);
+        scene.add(sphere);
+        pathSpheres.push(sphere);
+      }
+
+      const lineGeo = new THREE.BufferGeometry().setFromPoints(points3d);
+      const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff });
+      const lineObj = new THREE.Line(lineGeo, lineMat);
+      scene.add(lineObj);
+      pathLine = lineObj;
+    }
+
+    function updateInfo(text) {
+      document.getElementById('info').innerHTML = text;
+    }
+
+
+
+    function runLocalFromClick(x, y) {
+      const mode = document.getElementById('mode').value;
+      const path = localSearch(x, y, mode, 0.05, 400);
+      currentPath = path;
+      drawPath3D();
+
+      const last = path[path.length - 1];
+      const modeText = mode === 'min' ? 'ЛОКАЛЬНЫЙ МИНИМУМ' : 'ЛОКАЛЬНЫЙ МАКСИМУМ';
+      updateInfo(`${modeText}  f = ${last.z.toFixed(4)}  в (${last.x.toFixed(2)}, ${last.y.toFixed(2)})  (клик)  шагов: ${path.length - 1}`);
+    }
+
+    function clearPath() {
+      clearPathVisual();
+      currentPath = [];
+      updateInfo('ПУТИ ОЧИЩЕНЫ');
+    }
+
+    function onNoiseChange() {
+      let noise = parseFloat(document.getElementById('noiseVal').value);
+      if (isNaN(noise)) noise = 0;
+      noise = Math.min(1.0, Math.max(0, noise));
+      currentNoise = noise;
+      buildSurface();
+      clearPathVisual();
+      currentPath = [];
+      updateInfo(`ШУМ = ${currentNoise}"`);
+    }
+
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    function onCanvasClick(event) {
+      mouse.x = (event.clientX / renderer.domElement.clientWidth) * 2 - 1;
+      mouse.y = -(event.clientY / renderer.domElement.clientHeight) * 2 + 1;
+
+      raycaster.setFromCamera(mouse, camera);
+      if (surfaceMesh) {
+        const intersects = raycaster.intersectObject(surfaceMesh);
+        if (intersects.length > 0) {
+          const point = intersects[0].point;
+          let clickX = point.x;
+          let clickZ = point.z;
+
+          clickX = Math.min(BOUNDS.xMax - 0.1, Math.max(BOUNDS.xMin + 0.1, clickX));
+          clickZ = Math.min(BOUNDS.yMax - 0.1, Math.max(BOUNDS.yMin + 0.1, clickZ));
+
+          const tempSphereGeo = new THREE.SphereGeometry(0.13, 12, 12);
+          const tempSphereMat = new THREE.MeshStandardMaterial({ color: 0xffaa44 });
+          const tempSphere = new THREE.Mesh(tempSphereGeo, tempSphereMat);
+          const zVal = f(clickX, clickZ);
+          tempSphere.position.set(clickX, zVal, clickZ);
+          scene.add(tempSphere);
+          setTimeout(() => scene.remove(tempSphere), 500);
+
+          runLocalFromClick(clickX, clickZ);
+        }
+      }
+    }
+
+    document.getElementById('clearBtn').addEventListener('click', clearPath);
+    document.getElementById('noiseVal').addEventListener('change', onNoiseChange);
+    window.addEventListener('click', onCanvasClick, false);
+
+    currentNoise = 0;
+    buildSurface();
+
+
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+
+</html>
